@@ -2,19 +2,22 @@
 (function () {
   'use strict';
   const E = window.ParkEngine;
+  const Nav = window.ParkNav;
   const fac = E.buildFacility();
   const ZN = E.ZONES, FL = E.FLOORS;
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const pad = n => String(n).padStart(2, '0');
-  const clock = t => { const m = Math.round(t / 60) + 420; return pad(Math.floor(m / 60) % 24) + ':' + pad(m % 60); };
+  const clock = t => { const m = ((Math.round(t / 60) + 420) % 1440 + 1440) % 1440; return pad(Math.floor(m / 60)) + ':' + pad(m % 60); };
   const dur = s => { s = Math.max(0, Math.round(s)); if (s < 60) return s + '초'; const m = Math.floor(s / 60), r = s % 60; return r ? `${m}분 ${r}초` : `${m}분`; };
   const pct = (x, d) => (x * 100).toFixed(d || 0) + '%';
   const tok = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   const STATUS_KO = ['빈자리', '배정 보관(hold)', '주차 중', '차단 · 센서 불일치', '평시 폐쇄'];
   const LANE_KO = ['북측', '중앙', '남측'];
   const SIGN_FONT = '"Barlow Condensed", "IBM Plex Sans KR", sans-serif';
+  const NAV_NAME = { tmap: 'TMAP', kakao: '카카오맵', naver: '네이버 지도' };
+  const NAV_BTN = { tmap: 'TMAP으로 길안내 시작', kakao: '카카오맵으로 길안내 시작', naver: '네이버 지도로 길안내 시작' };
   const SEEDS = [
     { seed: 20260914, label: '9월 14일 (월) — 기본' },
     { seed: 20260915, label: '9월 15일 (화)' },
@@ -26,8 +29,16 @@
     p: { seed: 0, compliance: 0.65, participation: 0.6, etaShare: 0.45, holdCap: 0.7, b3: false, w: Object.assign({}, E.DEFAULT_W) },
     day: null, base: null, runs: {}, live: null, liveOps: [], sweep: [], sweepToken: 0, score: null, fcCache: {}, actual: null,
   };
-  const VIS = { step: 0, plate: '3456', dis: false, ev: false, large: false, eta: 11100, share: true, consent: false, rank: 0, reassigned: null, rating: 0 };
-  const APPT = 12600; // 10:30 심장내과
+  // 백엔드 연결(선택). 없으면 브라우저 안에서 모두 계산하는 데모 모드
+  let API_BASE = Nav.apiBase();
+  let api = API_BASE ? new Nav.Api(API_BASE) : null;
+  let apiInfo = null;
+  const DEMO_DEPART = 9000;   // 데모 모드 출발 시각 09:30 (시뮬레이션 날짜 기준)
+  const VIS = {
+    step: 0, plate: '3456', dis: false, ev: false, large: false, consent: false, navApp: 'tmap',
+    route: null, eta: null, etaStd: 480, busy: '', err: '', rank: 0, reassigned: null, rating: 0,
+    appt: 12600, session: null, remote: null, signage: null, timers: [],
+  };
 
   // ---------- 시나리오 실행 ----------
   function runScenario() {
@@ -102,7 +113,6 @@
     g.fillStyle = C.lane;
     E.LANE_Y.forEach(y => g.fillRect(0, y - 3, 100, 6));
     g.fillRect(0, 5, 10, 38); g.fillRect(90, 5, 10, 38);
-    // 램프
     g.textAlign = 'center'; g.textBaseline = 'middle';
     E.RAMPS.forEach((r, i) => {
       const x = i === 0 ? 0.6 : 95.4;
@@ -112,13 +122,11 @@
       g.save(); g.translate(x + 2, 24); g.rotate(i === 0 ? -Math.PI / 2 : Math.PI / 2);
       g.fillStyle = C.ink; g.font = `600 2.1px ${SIGN_FONT}`; g.fillText(r.name, 0, 0); g.restore();
     });
-    // 구역 표시
     g.fillStyle = C.ink3; g.font = `600 2.5px ${SIGN_FONT}`;
     'ABCD'.split('').forEach((z, i) => g.fillText(z + '구역', 20 + 20 * i, -2.2));
     g.strokeStyle = C.rule; g.lineWidth = 0.15; g.setLineDash([0.6, 0.6]);
     [30, 50, 70].forEach(x => { g.beginPath(); g.moveTo(x, -1); g.lineTo(x, 48); g.stroke(); });
     g.setLineDash([]);
-    // 슬롯
     for (const s of fac.slots) {
       if (s.f !== f) continue;
       const st = status[s.i];
@@ -129,14 +137,12 @@
       if (st === E.FREE) { g.strokeStyle = C.edge; g.lineWidth = 0.14; g.strokeRect(x, y, w, h); }
       if (s.disabled || s.ev) { g.fillStyle = s.disabled ? C.sign : C.ok; g.beginPath(); g.arc(s.x, s.y, 0.5, 0, 6.2832); g.fill(); }
     }
-    // 승강기 코어
     E.ELEV.forEach(e => {
       const x = E.X0 + E.SW * e.cols[0], y = E.ROW_Y[e.rows[0]];
       g.fillStyle = C.ink; g.fillRect(x + 0.2, y + 0.3, 7.1, 9.4);
       g.fillStyle = C.ground; g.font = `700 3.2px ${SIGN_FONT}`; g.fillText(e.id, x + 3.75, y + 4.4);
       g.font = `500 1.7px ${SIGN_FONT}`; g.fillText(e.bld, x + 3.75, y + 7.2);
     });
-    // 방문객 경로
     if (opt.hl) {
       const s = fac.slots[opt.hl.s], ly = E.LANE_Y[s.lane], rx = E.RAMPS[opt.hl.ramp].x, el = E.ELEV[opt.hl.elev];
       g.lineJoin = 'round'; g.lineCap = 'round';
@@ -259,71 +265,199 @@
   // ---------- 방문객 ----------
   const RAIL = [
     { when: 'D-1', act: '진료 예약 확인 알림톡 수신', sys: '예약 시각 · 진료과를 예측 엔진에 반영하고, 알림톡에 "주차 자리 미리 받기" 링크를 넣습니다.' },
-    { when: '출발 시', act: '링크를 열어 도착 예정 시각 입력 · 내비 ETA 공유 허용', sys: '개별 도착 분포(평균 · 표준편차)를 갱신하고 배정 후보를 계산합니다.' },
+    { when: '출발 시', act: '위치 공유에 동의하면 내비 경로로 도착 시각 자동 계산', sys: 'TMAP · 카카오 경로 API로 거리와 실시간 교통을 반영한 ETA를 받고, 이동 중 1분마다 다시 계산합니다.' },
     { when: '도착 15분 전', act: '배정 알림 수신', sys: '5분마다 도는 롤링 호라이즌 배정 결과로 슬롯을 hold하고 전광판 · 관제에 반영합니다.' },
     { when: '진입', act: '번호판 인식 → 전광판 방향 안내', sys: 'hold를 확정하고, 배정된 램프로 진입을 분산합니다.' },
     { when: '주차 후', act: '웹앱 도보 안내', sys: '점유 센서로 주차를 확인하고 배정 준수 로그를 남깁니다.' },
     { when: '출차', act: '정산은 기존 방식 그대로', sys: '실제 체류 시간을 출차 예측 학습 데이터로 쌓습니다.' },
   ];
+
+  function stopTimers() { VIS.timers.forEach(clearInterval); VIS.timers = []; }
+  function getPosition() {
+    return new Promise((resolve, reject) => {
+      if (!navigator.geolocation) { reject(new Error('이 브라우저는 위치 기능을 지원하지 않습니다. 예시 출발지를 골라 주세요.')); return; }
+      navigator.geolocation.getCurrentPosition(
+        p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+        e => reject(new Error(e.code === 1 ? '위치 권한이 거부되었습니다. 예시 출발지를 고르거나 브라우저 설정에서 위치를 허용해 주세요.' : '현재 위치를 가져오지 못했습니다. 예시 출발지를 골라 주세요.')),
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 });
+    });
+  }
+  const providerFor = app => app === 'kakao' ? 'kakao' : app === 'tmap' ? 'tmap' : 'auto';
+  async function ensureSession() {
+    if (VIS.session) return;
+    const r = await api.createSession('DEMO-VISIT');
+    VIS.session = r.session_token;
+    VIS.appt = Nav.isoToT(r.reservation.appointment_at);
+  }
+  function pushConsent() {
+    return api.consent(VIS.session, { consent: true, plate: VIS.plate, vehicle: { disabled: VIS.dis, ev: VIS.ev, ev_charge: VIS.ev, large: VIS.large } });
+  }
+  function applyEta(r, label) {
+    const rt = r.route || {};
+    VIS.eta = Nav.isoToT(r.eta); VIS.etaStd = r.eta_std_s;
+    VIS.route = {
+      provider: rt.provider || r.eta_source, traffic: !!rt.traffic, duration_s: rt.duration_s, distance_m: rt.distance_m,
+      departT: rt.computed_at ? Nav.isoToT(rt.computed_at) : Nav.nowT(), originLabel: label || (VIS.route && VIS.route.originLabel) || '현재 위치',
+      fallback: rt.fallback_reason ? `실시간 경로 API를 쓸 수 없어 교통 패턴 모델로 계산했습니다 (${rt.fallback_reason}).` : null,
+      updatedT: Nav.nowT(), cached: !!r.cached,
+    };
+  }
+  async function estimate(origin, label) {
+    VIS.busy = 'route'; VIS.err = ''; renderVisitor();
+    try {
+      if (api) {
+        await ensureSession();
+        await pushConsent();
+        applyEta(await api.eta(VIS.session, { source: 'nav', origin, provider: providerFor(VIS.navApp) }), label);
+      } else {
+        let o = origin, lbl = label, note = null;
+        const inKorea = o.lat >= 33 && o.lat <= 39 && o.lng >= 124 && o.lng <= 132;
+        let est = inKorea ? Nav.modelRoute(o, Nav.DEST, 9) : null;
+        if (!est || est.duration_s > 3 * 3600) {
+          o = Nav.SAMPLE_ORIGINS[0]; lbl = o.label; est = Nav.modelRoute(o, Nav.DEST, 9);
+          note = '현재 위치가 병원에서 너무 멀어 예시 출발지(판교역)로 계산했습니다.';
+        }
+        VIS.eta = DEMO_DEPART + est.duration_s; VIS.etaStd = est.std_s;
+        VIS.route = { provider: 'model', traffic: false, duration_s: est.duration_s, distance_m: est.distance_m, departT: DEMO_DEPART, originLabel: lbl, fallback: note, updatedT: DEMO_DEPART, cached: false };
+      }
+      VIS.rank = 0; VIS.reassigned = null; VIS.remote = null;
+    } catch (e) { VIS.err = e.message; }
+    VIS.busy = '';
+    renderVisitor();
+    if (api && VIS.route && label === '현재 위치') startEtaRefresh();
+  }
+  // 이동 중 ETA 갱신 (화면이 열려 있는 동안 1분마다, 서버는 30초 안의 재요청을 캐시로 돌려준다)
+  function startEtaRefresh() {
+    stopTimers();
+    VIS.timers.push(setInterval(async () => {
+      if (VIS.step > 2 || document.hidden || !VIS.session) return;
+      try {
+        const o = await getPosition();
+        applyEta(await api.eta(VIS.session, { source: 'nav', origin: o, provider: providerFor(VIS.navApp) }), '현재 위치');
+        if (VIS.step === 2) await loadRemote();
+        renderVisitor({ soft: true });
+      } catch (e) { /* 다음 주기에 다시 시도 */ }
+    }, 60000));
+  }
+  async function loadRemote() {
+    const [a, st] = await Promise.all([api.assignment(VIS.session, true), api.state('hangyeol')]);
+    VIS.remote = { a, st, t: Nav.nowT() };
+  }
+  function startAssignPoll() {
+    VIS.timers.push(setInterval(async () => {
+      if (VIS.step !== 2 || document.hidden) return;
+      try { await loadRemote(); renderVisitor({ soft: true }); } catch (e) { /* 무시 */ }
+    }, 30000));
+  }
+
+  function planFromRemote() {
+    const { a, st, t } = VIS.remote;
+    if (!a.slot) return null;
+    const status = Uint8Array.from(st.slots, ch => +ch);
+    return {
+      live: true, state: a.status, at: a.assign_at ? Nav.isoToT(a.assign_at) : t,
+      cands: a.candidates.map(c => ({ s: c.s, ramp: c.ramp, drive: c.drive, walk: c.walk, rampP: c.ramp_pen, floorP: c.floor_pen, mis: c.mismatch, total: c.total })),
+      pick: { s: a.slot.index, ramp: a.ramp.index, drive: a.drive_s, walk: a.walk_s },
+      sd: a.eta_std_s, holdExp: a.hold_expires_at ? Nav.isoToT(a.hold_expires_at) : null,
+      wp: { elev: a.walk.elev, elevIdx: a.walk.elev_index, toElevM: a.walk.to_elev_m, toElevS: a.walk.to_elev_s, waitS: a.walk.wait_s, rideS: a.walk.ride_s, lobbyM: a.walk.lobby_m, lobbyS: a.walk.lobby_s, total: a.walk.total_s },
+      slot: fac.slots[a.slot.index], display: a.display,
+      sn: { t, status, gateNext: [t + a.state.gate_wait_s[0], t + a.state.gate_wait_s[1]], searching: a.state.searching },
+    };
+  }
   function vPlan() {
+    if (VIS.remote) { const p = planFromRemote(); if (p) return p; }
     const veh = { zone: 0, disabled: VIS.dis, ev: VIS.ev, evWant: VIS.ev, large: VIS.large };
     const at = VIS.eta - 900;
     const sn = snapAt(S.runs.rolling, at);
     const ctx = E.ctxFromSnap(fac, sn);
     const cands = E.rankSlots(fac, sn.status, veh, ctx, S.p.w, 6);
     const pick = cands[Math.min(VIS.rank, cands.length - 1)];
-    const sd = VIS.share ? 240 : 480;
-    const hour = Math.min(12, Math.floor(VIS.eta / 3600));
+    const hour = Math.max(0, Math.min(12, Math.floor(VIS.eta / 3600)));
     const wp = E.walkParts(fac, pick.s, 0, hour);
-    return { veh, at, sn, ctx, cands, pick, sd, holdExp: VIS.eta + 2 * sd + 600, wp, slot: fac.slots[pick.s] };
+    return { live: false, state: 'assigned', veh, at, sn, ctx, cands, pick, sd: VIS.etaStd, holdExp: VIS.eta + 2 * VIS.etaStd + 600, wp, slot: fac.slots[pick.s] };
   }
   function baselineNear(t) {
     const vs = S.runs.none.V.filter(v => Math.abs(v.arr - t) <= 1800 && v.parkedAt != null);
     const avg = k => vs.reduce((a, v) => a + v[k], 0) / Math.max(1, vs.length);
-    return { n: vs.length, search: avg('search'), walk: avg('walk'), gate: avg('gateWait') };
+    return { n: vs.length, search: avg('search'), walk: avg('walk') };
+  }
+  function navCard(r) {
+    const spare = Math.round((VIS.appt - VIS.eta) / 60);
+    const prov = Nav.PROVIDER_KO[r.provider] || r.provider;
+    const foot = api
+      ? (r.traffic ? '이 화면을 열어 두면 1분마다 현재 위치로 다시 계산합니다. 내비 앱으로 넘어간 뒤에는 마지막 계산값으로 자리를 보관합니다.' : '')
+      : '데모: 시간대별 교통 패턴 모델로 계산했습니다. API 서버를 연결하면 TMAP 실시간 교통으로 계산하고 이동 중에 갱신합니다.';
+    return `<div class="navcard">
+      <div class="navcard-head"><span class="chip ${r.traffic ? 'info' : 'neutral'}">${esc(prov)}</span><span class="mono">${r.cached ? '방금 계산한 값' : clock(r.updatedT) + ' 계산'}</span></div>
+      <div class="eta-big"><b>${clock(VIS.eta)}</b><span>도착 예정 · 오차 ±${Math.round(VIS.etaStd / 60)}분</span></div>
+      <div class="facts">
+        <div><span>출발</span><b>${esc(r.originLabel)} ${clock(r.departT)}</b></div>
+        <div><span>경로 거리</span><b>${(r.distance_m / 1000).toFixed(1)}km</b></div>
+        <div><span>예상 소요</span><b>${dur(r.duration_s)}</b></div>
+        <div><span>예약까지 여유</span><b>${spare >= 0 ? spare + '분' : '늦음 ' + (-spare) + '분'}</b></div>
+      </div>
+      ${r.fallback ? `<p class="fine">${esc(r.fallback)}</p>` : ''}
+      <a class="btn ghost" href="${esc(Nav.deepLink(VIS.navApp))}">${NAV_BTN[VIS.navApp]}</a>
+      ${foot ? `<p class="fine">${foot}</p>` : ''}
+    </div>`;
   }
 
-  function renderVisitor() {
-    const P = vPlan();
+  function renderVisitor(opt) {
+    if (opt && opt.soft && document.activeElement && document.activeElement.id === 'plate') return;
     const step = VIS.step;
-    const times = ['18:00', clock(VIS.eta - 1800), clock(P.at), clock(VIS.eta), clock(VIS.eta + P.pick.drive)];
+    const P = step >= 2 ? vPlan() : null;
+    const apptLabel = api ? `오늘 ${clock(VIS.appt)}` : '9월 14일(월) 10:30';
+    const times = [api ? clock(Nav.nowT()) : '18:00', VIS.route ? clock(VIS.route.departT) : (api ? clock(Nav.nowT()) : '09:30'),
+      P ? clock(P.live && P.state !== 'preview' ? VIS.remote.t : P.at) : '', clock(VIS.eta || 0), P ? clock(VIS.eta + P.pick.drive) : ''];
+    const busy = !!VIS.busy;
+    const errBox = VIS.err && step !== 1 ? `<div class="notice">${esc(VIS.err)}</div>` : '';
     let body = '';
     if (step === 0) {
       body = `<div class="chat">
-        <div class="chat-day mono">9월 13일 (일) 오후 6:00</div>
+        <div class="chat-day mono">${api ? '오늘' : '9월 13일 (일) 오후 6:00'}</div>
         <div class="bubble">
           <div class="bubble-from"><span class="psign sm" aria-hidden="true">P</span>한결종합병원 · 알림톡</div>
-          <p><b>김하늘</b> 님, 내일 진료 예약을 알려드립니다.</p>
-          <dl><dt>일시</dt><dd>9월 14일(월) 10:30</dd><dt>진료과</dt><dd>본관 3층 심장내과</dd></dl>
-          <p>도착 전에 주차 자리를 미리 받으면 층을 돌며 빈자리를 찾지 않아도 됩니다.</p>
-          <button class="btn paint" type="button" data-act="next">주차 자리 미리 받기</button>
+          <p><b>김하늘</b> 님, ${api ? '오늘' : '내일'} 진료 예약을 알려드립니다.</p>
+          <dl><dt>일시</dt><dd>${apptLabel}</dd><dt>진료과</dt><dd>본관 3층 심장내과</dd></dl>
+          <p>출발할 때 위치 공유만 허용하면, 내비 경로로 도착 시각을 계산해 가까운 자리를 미리 잡아 드립니다.</p>
+          <button class="btn paint" type="button" data-act="next" ${busy ? 'disabled' : ''}>${VIS.busy === 'next' ? '여는 중…' : '주차 자리 미리 받기'}</button>
         </div>
+        ${errBox}
         <p class="fine">가상 시설 · 가상 환자 예시입니다.</p>
       </div>`;
     } else if (step === 1) {
-      const lead = Math.round((APPT - VIS.eta) / 60);
-      body = `<h2>출발 전에 알려주세요</h2>
-        <p class="lead">입력한 도착 시각의 15분 전에 자리를 배정해 알림으로 보내드립니다.</p>
-        <div class="resv"><span>예약</span><b>9월 14일(월) 10:30</b><span>목적지</span><b>본관 3층 심장내과</b></div>
+      const r = VIS.route;
+      const canCalc = VIS.consent && !busy;
+      body = `<h2>도착 시간은 내비가 알려드려요</h2>
+        <p class="lead">현재 위치에서 병원까지의 경로 거리와 교통 상황으로 도착 예정 시각을 계산합니다. 시간을 직접 넣을 필요가 없어요.</p>
+        <div class="resv"><span>예약</span><b>${apptLabel}</b><span>목적지</span><b>본관 3층 심장내과</b></div>
         <div class="field"><label for="plate">차량 번호 끝 4자리</label><input id="plate" class="plate" inputmode="numeric" maxlength="4" autocomplete="off" value="${esc(VIS.plate)}"></div>
         <div class="field"><span class="lbl">차량 조건</span><div class="opts">
           <button type="button" class="opt" data-act="attr" data-k="dis" aria-pressed="${VIS.dis}">장애인 주차</button>
           <button type="button" class="opt" data-act="attr" data-k="ev" aria-pressed="${VIS.ev}">전기차 충전</button>
           <button type="button" class="opt" data-act="attr" data-k="large" aria-pressed="${VIS.large}">대형차</button>
         </div></div>
-        <div class="field"><span class="lbl">도착 예정 시각</span><div class="stepper">
-          <button type="button" data-act="eta" data-d="-300" aria-label="5분 앞당기기">−5분</button>
-          <output>${clock(VIS.eta)}<small>${lead >= 0 ? `예약 ${lead}분 전` : `예약 ${-lead}분 후`}</small></output>
-          <button type="button" data-act="eta" data-d="300" aria-label="5분 늦추기">+5분</button>
+        <label class="switch"><input type="checkbox" data-act="consent" ${VIS.consent ? 'checked' : ''}><span>위치 · 도착 예정 시각 공유에 동의합니다<small>현재 위치는 경로 계산에만 쓰고 저장하지 않습니다. 도착 시각은 세션이 끝나면 24시간 안에 지웁니다.</small></span></label>
+        <div class="field"><span class="lbl">길안내에 쓸 내비게이션</span><div class="opts">
+          ${['tmap', 'kakao', 'naver'].map(k => `<button type="button" class="opt" data-act="app" data-k="${k}" aria-pressed="${VIS.navApp === k}">${NAV_NAME[k]}</button>`).join('')}
         </div></div>
-        <label class="switch"><input type="checkbox" data-act="share" ${VIS.share ? 'checked' : ''}><span>내비 ETA 자동 공유<small>켜면 도착 시각 오차가 줄어(σ 8분 → 4분) 자리 보관 시간을 정확히 잡습니다.</small></span></label>
-        <label class="switch"><input type="checkbox" data-act="consent" ${VIS.consent ? 'checked' : ''}><span>출발 · 도착 시각 공유에 동의합니다<small>주차 안내에만 쓰고, 세션이 끝나면 24시간 안에 원본을 지웁니다.</small></span></label>
-        <button class="btn" type="button" data-act="next" ${VIS.consent ? '' : 'disabled'}>자리 받기</button>
-        ${VIS.consent ? '' : '<p class="fine">동의에 체크하면 버튼이 켜집니다.</p>'}`;
+        <button class="btn" type="button" data-act="locate" ${canCalc ? '' : 'disabled'}>${VIS.busy === 'route' ? '경로 계산 중…' : '현재 위치로 도착 시간 계산'}</button>
+        <div class="field"><span class="lbl">위치를 쓰기 어렵다면 예시 출발지</span><div class="opts">
+          ${Nav.SAMPLE_ORIGINS.map((o, i) => `<button type="button" class="opt" data-act="origin" data-i="${i}" ${canCalc ? '' : 'disabled'} aria-pressed="${!!(r && r.originLabel === o.label)}">${o.label}</button>`).join('')}
+        </div></div>
+        ${VIS.err ? `<div class="notice">${esc(VIS.err)}</div>` : ''}
+        ${r ? navCard(r) : ''}
+        <button class="btn" type="button" data-act="next" ${r && !busy ? '' : 'disabled'}>${VIS.busy === 'next' ? '배정 계산 중…' : '자리 받기'}</button>
+        ${!VIS.consent ? '<p class="fine">동의에 체크하면 계산 버튼이 켜집니다.</p>' : !r ? '<p class="fine">도착 시간을 계산하면 자리 받기가 켜집니다.</p>' : ''}`;
     } else if (step === 2) {
       const sl = P.slot, tn = turnOf(sl, P.pick.ramp);
-      body = `${VIS.reassigned ? `<div class="notice"><b>자리가 바뀌었어요.</b> ${esc(VIS.reassigned)}에 다른 차량이 먼저 주차해, 목적지에서 가까운 다음 자리로 다시 배정했습니다.</div>` : ''}
-        <p class="fine mono">${clock(P.at)} 배정 · 도착 15분 전 알림</p>
+      const head = P.live
+        ? (P.state === 'preview'
+          ? `<p class="fine mono">${clock(P.at)} 확정 예정 · 지금 기준 가장 좋은 자리 (아직 보관 전)</p>`
+          : `<p class="fine mono">${clock(VIS.remote.t)} 배정 확정 · 자리 보관 중</p>`)
+        : `<p class="fine mono">${clock(P.at)} 배정 · 도착 15분 전 알림</p>`;
+      body = `${errBox}${VIS.reassigned ? `<div class="notice"><b>자리가 바뀌었어요.</b> ${esc(VIS.reassigned)}에 다른 차량이 먼저 주차해, 목적지에서 가까운 다음 자리로 다시 배정했습니다.</div>` : ''}
+        ${head}
         <div class="slotsign" aria-label="배정 자리 ${FL[sl.f]} ${sl.zone}구역 ${sl.num}번">
           <div class="flr">${FL[sl.f]}</div><div class="zn">${sl.zone}구역 · ${LANE_KO[sl.lane]} 통로</div><div class="no">${sl.num}<small>번</small></div>
         </div>
@@ -331,7 +465,7 @@
         <div class="facts">
           <div><span>주차장 안 주행</span><b>${dur(P.pick.drive)}</b></div>
           <div><span>진료과까지 도보</span><b>${dur(P.pick.walk)}</b></div>
-          <div><span>자리 보관</span><b>${clock(P.holdExp)}까지</b></div>
+          <div><span>자리 보관</span><b>${P.holdExp != null ? clock(P.holdExp) + '까지' : '—'}</b></div>
           <div><span>진입 램프</span><b>${E.RAMPS[P.pick.ramp].name}</b></div>
         </div>
         <div class="ph-map"><canvas id="phMap" aria-label="배정 자리와 경로 지도"></canvas></div>
@@ -340,10 +474,11 @@
           <li>${tn.word === '직진' ? '중앙 통로로 직진' : `${tn.word} 후 ${LANE_KO[sl.lane]} 통로`}</li>
           <li>${sl.zone}구역 ${sl.num}번 · 노란 표시등이 켜진 자리</li>
         </ol>
-        <button class="btn" type="button" data-act="next">게이트 진입</button>
-        ${VIS.reassigned ? '' : '<button class="linkbtn" type="button" data-act="reassign">다른 차가 먼저 주차하면?</button>'}`;
+        ${P.live && P.state === 'preview' ? `<button class="btn ghost" type="button" data-act="confirm" ${busy ? 'disabled' : ''}>지금 확정 받기 (데모)</button>` : ''}
+        <button class="btn" type="button" data-act="next" ${busy ? 'disabled' : ''}>${VIS.busy === 'next' ? '게이트 통과 중…' : '게이트 진입'}</button>
+        ${!P.live && !VIS.reassigned ? '<button class="linkbtn" type="button" data-act="reassign">다른 차가 먼저 주차하면?</button>' : ''}`;
     } else if (step === 3) {
-      body = `<h2>게이트 통과</h2>
+      body = `${errBox}<h2>게이트 통과</h2>
         <p class="lead">번호판을 인식하면 보관 중인 자리가 확정되고, 전광판이 방향을 알려줍니다.</p>
         <canvas id="phLed" class="led" aria-label="게이트 전광판"></canvas>
         <div class="facts">
@@ -352,11 +487,11 @@
           <div><span>진입 램프</span><b>${E.RAMPS[P.pick.ramp].name}</b></div>
           <div><span>자리까지</span><b>${dur(P.pick.drive)}</b></div>
         </div>
-        <button class="btn" type="button" data-act="next">주차 완료</button>`;
+        <button class="btn" type="button" data-act="next" ${busy ? 'disabled' : ''}>${VIS.busy === 'next' ? '확인 중…' : '주차 완료'}</button>`;
     } else {
       const wp = P.wp, parkT = VIS.eta + P.pick.drive, arriveT = parkT + wp.total;
-      const spare = Math.round((APPT - arriveT) / 60);
-      body = `<h2>진료과까지 이렇게 가세요</h2>
+      const spare = Math.round((VIS.appt - arriveT) / 60);
+      body = `${errBox}<h2>진료과까지 이렇게 가세요</h2>
         <ol class="steps">
           <li><span class="n done">✓</span><span>${P.slot.label}에 주차 확인 (점유 센서)</span><span class="t">${clock(parkT)}</span></li>
           <li><span class="n">1</span><span>${wp.elev} 승강기까지 ${wp.toElevM}m 걷기</span><span class="t">${dur(wp.toElevS)}</span></li>
@@ -366,7 +501,7 @@
         </ol>
         <div class="facts">
           <div><span>진료과 도착 예상</span><b>${clock(arriveT)}</b></div>
-          <div><span>예약까지 여유</span><b>${spare}분</b></div>
+          <div><span>예약까지 여유</span><b>${spare >= 0 ? spare + '분' : '늦음 ' + (-spare) + '분'}</b></div>
         </div>
         <div class="field"><span class="lbl">오늘 주차 안내가 도움이 됐나요? (1문항)</span>
           <div class="rate">${[1, 2, 3, 4, 5].map(n => `<button type="button" data-act="rate" data-v="${n}" aria-pressed="${VIS.rating === n}">${n}</button>`).join('')}</div>
@@ -374,38 +509,39 @@
         ${VIS.rating ? '<p class="fine">응답을 기록했습니다(예시). 출차 정산은 기존 방식 그대로입니다.</p><button class="btn ghost" type="button" data-act="restart">처음부터 다시 보기</button>' : ''}`;
     }
     $('#screen').innerHTML = `<div class="ph-status mono"><span>${times[step]}</span><span>LTE</span></div>
-      <div class="ph-app"><span class="psign sm" aria-hidden="true">P</span>자리먼저${step > 0 ? '<button class="linkbtn" type="button" data-act="back" style="margin-left:10px">이전</button>' : ''}<span class="ph-step">${step + 1}/5</span></div>
+      <div class="ph-app"><span class="psign sm" aria-hidden="true">P</span>자리먼저${step > 0 && step < 3 ? '<button class="linkbtn" type="button" data-act="back" style="margin-left:10px">이전</button>' : ''}<span class="ph-step">${step + 1}/5</span></div>
       <div class="scr">${body}</div>`;
 
     const cur = VIS.step === 4 && VIS.rating ? 5 : VIS.step;
     $('#rail').innerHTML = RAIL.map((r, i) => `<li class="${i < cur ? 'past' : i === cur ? 'cur' : ''}"><span class="when">${r.when}</span><span class="dot"></span><div class="body"><b>${r.act}</b><p>${r.sys}</p></div></li>`).join('');
     renderDetail(P);
 
-    if (step === 2) {
-      const status = P.sn.status.slice();
-      drawFloor($('#phMap'), P.slot.f, status, { hl: { s: P.pick.s, ramp: P.pick.ramp, elev: P.wp.elevIdx } });
-    }
+    if (step === 2) drawFloor($('#phMap'), P.slot.f, P.sn.status, { hl: { s: P.pick.s, ramp: P.pick.ramp, elev: P.wp.elevIdx } });
     if (step === 3) {
       const tn = turnOf(P.slot, P.pick.ramp);
-      drawLED($('#phLed'), [`${VIS.plate} 차량`, `${FL[P.slot.f]} ${P.slot.zone}-${P.slot.num} ${tn.arrow}${tn.word}`], ['#7CFF9B', '#FFB02E']);
+      const lines = VIS.signage || [`${VIS.plate} 차량`, `${FL[P.slot.f]} ${P.slot.zone}-${P.slot.num} ${tn.arrow}${tn.word}`];
+      drawLED($('#phLed'), lines, ['#7CFF9B', '#FFB02E']);
     }
   }
 
   function renderDetail(P) {
     const el = $('#detail');
     if (VIS.step <= 1) {
-      const sd = VIS.share ? 240 : 480;
+      const r = VIS.route;
+      const where = api ? `POST ${API_BASE}/v1/sessions/{token}/eta` : '브라우저 내 교통 패턴 모델 (API 미연결)';
       el.innerHTML = `<h3>엔진이 받는 입력</h3>
-        <p class="muted">번호판 · 연락처 원문은 플랫폼에 저장하지 않습니다. 예약 어댑터가 익명 토큰과 예약 시각 · 목적지 존만 넘깁니다.</p>
+        <p class="muted">번호판 · 연락처 원문은 플랫폼에 저장하지 않습니다. 현재 위치는 경로 API 호출에만 쓰고, 결과로는 소요 시간 · 거리만 남깁니다.</p>
         <div class="tbl-wrap"><table class="data">
           <tbody>
-            <tr><td>예약</td><td>10:30 · 본관 3층 심장내과 (존 CARD)</td></tr>
-            <tr><td>도착 분포</td><td>${VIS.step === 0 ? '예약 기반 사전분포 · 평균 10:08, σ 11분' : `${VIS.share ? '내비 ETA' : '직접 입력'} · 평균 ${clock(VIS.eta)}, σ ${sd / 60}분`}</td></tr>
-            <tr><td>배정 시점</td><td>${clock(VIS.eta - 900)} (도착 15분 전, 5분 주기 재계산)</td></tr>
-            <tr><td>hold 유효</td><td>${clock(VIS.eta + 2 * sd + 600)}까지 (도착 + 2σ + 10분)</td></tr>
-            <tr><td>차량 조건</td><td>${[VIS.dis && '장애인', VIS.ev && '전기차 충전', VIS.large && '대형차'].filter(Boolean).join(' · ') || '없음'}</td></tr>
+            <tr><td>예약</td><td>${api ? '오늘 ' + clock(VIS.appt) : '10:30'} · 본관 3층 심장내과 (존 CARD)</td></tr>
+            <tr><td>도착 분포</td><td>${r ? `${esc(Nav.PROVIDER_KO[r.provider] || r.provider)} · 평균 ${clock(VIS.eta)}, σ ${Math.round(VIS.etaStd / 60)}분` : `예약 기반 사전분포 · 평균 ${clock(VIS.appt - 1320)}, σ 11분`}</td></tr>
+            <tr><td>경로</td><td>${r ? `${esc(r.originLabel)} → 병원 ${(r.distance_m / 1000).toFixed(1)}km · ${dur(r.duration_s)}` : '위치 공유 전'}</td></tr>
+            <tr><td>배정 시점</td><td>${r ? clock(VIS.eta - 900) + ' (도착 15분 전, 5분 주기 재계산)' : '—'}</td></tr>
+            <tr><td>hold 유효</td><td>${r ? clock(VIS.eta + 2 * VIS.etaStd + 600) + '까지 (도착 + 2σ + 10분)' : '—'}</td></tr>
+            <tr><td>ETA 계산</td><td class="lab">${esc(where)}</td></tr>
           </tbody>
-        </table></div>`;
+        </table></div>
+        <p class="muted" style="margin-top:12px">오차 σ는 실시간 교통 경로(TMAP · 카카오)일 때 소요 시간의 8%(최소 3분), 교통 패턴 모델일 때 15%(최소 4분)로 둡니다 [가정]. σ가 작을수록 자리 보관 시간이 짧아져 다른 차량이 쓸 수 있는 자리가 늘어납니다.</p>`;
       return;
     }
     const w = S.p.w, b = baselineNear(VIS.eta);
@@ -413,7 +549,8 @@
     const held = P.sn.status.reduce((a, s) => a + (s === E.HELD ? 1 : 0), 0);
     const rows = P.cands.slice(0, 5).map((c, i) => `<tr class="${c.s === P.pick.s ? 'pick' : ''}"><td>${i + 1}</td><td class="lab">${fac.slots[c.s].label}</td><td>${E.RAMPS[c.ramp].id}</td><td>${Math.round(c.drive)}</td><td>${Math.round(c.walk)}</td><td>${Math.round(c.rampP)}</td><td>${Math.round(c.floorP)}</td><td>${Math.round(c.mis)}</td><td><b>${Math.round(c.total)}</b></td></tr>`).join('');
     const us = P.pick.drive + P.pick.walk, them = b.search + b.walk;
-    el.innerHTML = `<h3>배정 엔진 계산 내역 · ${clock(P.at)} 주차장 상태 기준</h3>
+    const src = P.live ? `서버(${esc(API_BASE)}) 실시간 상태` : `${clock(P.at)} 시뮬레이션 스냅숏`;
+    el.innerHTML = `<h3>배정 엔진 계산 내역 · ${src}</h3>
       <p class="muted">빈자리 ${free}면 · hold ${held}면 · 서측 게이트 대기 ${Math.round(Math.max(0, P.sn.gateNext[0] - P.sn.t))}초. cost = ${w.w1}·주행 + ${w.w2}·도보(승강기 대기 포함) + ${w.w3}·램프 혼잡 + ${w.w4}·층 균형 + ${w.w5}·속성 불일치, 단위는 초 환산입니다.</p>
       <div class="tbl-wrap"><table class="data">
         <thead><tr><th>순위</th><th>슬롯</th><th>램프</th><th>주행</th><th>도보</th><th>램프 혼잡</th><th>층 균형</th><th>속성</th><th>비용</th></tr></thead>
@@ -421,30 +558,68 @@
       </table></div>
       <div class="compare">
         <div class="us"><span>자리먼저 안내</span><b>${dur(us)}</b><small>주행 ${dur(P.pick.drive)} + 도보 ${dur(P.pick.walk)}</small></div>
-        <div><span>혼자 찾을 때 (같은 시간대 평균)</span><b>${dur(them)}</b><small>탐색 ${dur(b.search)} + 도보 ${dur(b.walk)} · 시뮬레이션 ${b.n}대</small></div>
+        ${b.n ? `<div><span>혼자 찾을 때 (같은 시간대 평균)</span><b>${dur(them)}</b><small>탐색 ${dur(b.search)} + 도보 ${dur(b.walk)} · 시뮬레이션 ${b.n}대</small></div>` : '<div><span>혼자 찾을 때</span><b>—</b><small>이 시간대 시뮬레이션 표본이 없습니다</small></div>'}
       </div>`;
   }
 
-  function visitorClick(ev) {
-    const btn = ev.target.closest('[data-act]');
-    if (!btn || btn.tagName === 'INPUT') return;
-    const act = btn.dataset.act;
-    if (act === 'next') { VIS.step = Math.min(4, VIS.step + 1); }
-    else if (act === 'back') { VIS.step = Math.max(0, VIS.step - 1); }
-    else if (act === 'attr') { VIS[btn.dataset.k] = !VIS[btn.dataset.k]; VIS.rank = 0; VIS.reassigned = null; }
-    else if (act === 'eta') { VIS.eta = Math.max(8400, Math.min(13500, VIS.eta + +btn.dataset.d)); VIS.rank = 0; VIS.reassigned = null; }
-    else if (act === 'reassign') { VIS.reassigned = vPlan().slot.label; VIS.rank = 1; }
-    else if (act === 'rate') { VIS.rating = +btn.dataset.v; }
-    else if (act === 'restart') { Object.assign(VIS, { step: 0, rank: 0, reassigned: null, rating: 0, consent: false }); }
-    else return;
+  async function goNext() {
+    const s = VIS.step;
+    if (api) {
+      VIS.busy = 'next'; VIS.err = ''; renderVisitor();
+      try {
+        if (s === 0) await ensureSession();
+        else if (s === 1) { await pushConsent(); await loadRemote(); startAssignPoll(); }
+        else if (s === 2) { const r = await api.demoEnter(VIS.session); VIS.signage = r.display; await loadRemote(); }
+        else if (s === 3) { await api.demoPark(VIS.session); await loadRemote(); }
+      } catch (e) { VIS.err = e.message; VIS.busy = ''; renderVisitor(); return; }
+      VIS.busy = '';
+    }
+    if (s >= 2) stopTimers();
+    VIS.step = Math.min(4, s + 1);
     renderVisitor();
     const scr = $('.scr');
-    if (scr && (act === 'next' || act === 'back' || act === 'restart')) { scr.scrollTop = 0; if (window.innerWidth <= 760) $('#screen').scrollIntoView({ block: 'start' }); }
+    if (scr) { scr.scrollTop = 0; if (window.innerWidth <= 760) $('#screen').scrollIntoView({ block: 'start' }); }
+  }
+  async function restart() {
+    stopTimers();
+    Object.assign(VIS, { step: 0, rank: 0, reassigned: null, rating: 0, consent: false, route: null, eta: null, err: '', busy: '', session: null, remote: null, signage: null });
+    renderVisitor();
+    if (api) { try { await ensureSession(); } catch (e) { VIS.err = e.message; } renderVisitor(); }
+  }
+  function visitorClick(ev) {
+    const btn = ev.target.closest('[data-act]');
+    if (!btn || btn.tagName === 'INPUT' || btn.disabled) return;
+    const act = btn.dataset.act;
+    if (act === 'next') { goNext(); return; }
+    if (act === 'restart') { restart(); return; }
+    if (act === 'locate') {
+      VIS.busy = 'route'; VIS.err = ''; renderVisitor();
+      getPosition().then(o => estimate(o, '현재 위치'), e => { VIS.busy = ''; VIS.err = e.message; renderVisitor(); });
+      return;
+    }
+    if (act === 'origin') { const o = Nav.SAMPLE_ORIGINS[+btn.dataset.i]; stopTimers(); estimate(o, o.label); return; }
+    if (act === 'confirm') {
+      VIS.busy = 'confirm'; renderVisitor();
+      api.assignNow(VIS.session).then(loadRemote).catch(e => { VIS.err = e.message; }).then(() => { VIS.busy = ''; renderVisitor(); });
+      return;
+    }
+    if (act === 'back') { VIS.step = Math.max(0, VIS.step - 1); VIS.err = ''; }
+    else if (act === 'attr') { VIS[btn.dataset.k] = !VIS[btn.dataset.k]; VIS.rank = 0; VIS.reassigned = null; VIS.remote = null; }
+    else if (act === 'app') { VIS.navApp = btn.dataset.k; }
+    else if (act === 'reassign') { VIS.reassigned = vPlan().slot.label; VIS.rank = 1; }
+    else if (act === 'rate') { VIS.rating = +btn.dataset.v; }
+    else return;
+    renderVisitor();
   }
   function visitorChange(ev) {
-    const act = ev.target.dataset.act;
-    if (act === 'share') { VIS.share = ev.target.checked; renderVisitor(); }
-    else if (act === 'consent') { VIS.consent = ev.target.checked; renderVisitor(); }
+    if (ev.target.dataset.act !== 'consent') return;
+    VIS.consent = ev.target.checked;
+    if (!VIS.consent) {
+      stopTimers();
+      VIS.route = null; VIS.eta = null; VIS.remote = null;
+      if (api && VIS.session) api.consent(VIS.session, { consent: false }).catch(() => null);   // 서버의 ETA도 지운다
+    }
+    renderVisitor();
   }
   function visitorInput(ev) {
     if (ev.target.id === 'plate') { ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 4); VIS.plate = ev.target.value || '0000'; }
@@ -474,7 +649,6 @@
       { l: '오늘 배정 준수율', v: asg.length ? pct(comp) : '—', sub: `${asg.length}대 기준 · ${comp >= 0.6 ? '<span class="chip ok">H2 60% 이상</span>' : '<span class="chip warn">H2 기준 미달</span>'}` },
     ].map(k => `<div class="kpi"><span class="lbl">${k.l}</span><span class="val">${k.v}</span><span class="sub">${k.sub}</span></div>`).join('');
 
-    // 지도
     $$('#floorSeg button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.f === S.floor)));
     drawFloor($('#opsMap'), S.floor, sn.status, { sel: S.sel });
     if (S.sel != null) {
@@ -488,7 +662,6 @@
       return `<div class="fbar"><strong>${FL[f]}</strong>${pct(a + h)} · hold ${se.held[f]}<div class="track"><i style="width:${a * 100}%;background:var(--occ)"></i><i style="width:${h * 100}%;background:var(--paint)"></i></div></div>`;
     }).join('');
 
-    // 도착 예측
     const bNow = Math.floor(t / 900);
     const bs = []; for (let b = Math.max(0, bNow - 6); b <= Math.min(47, bNow + 8); b++) bs.push(b);
     const pts = bs.map(b => {
@@ -514,7 +687,6 @@
     });
     $('#fcMeta').textContent = `오늘 MAPE ${pct(S.score.mape, 1)} · P10–P90 적중 ${pct(S.score.coverage)}`;
 
-    // 층별 점유율
     const occEl = $('#occChart');
     const ser = run.series.filter(s => s.t <= E.T_END);
     const rate = (s, f) => s.open[f] ? (s.occ[f] + s.held[f]) / s.open[f] * 100 : 0;
@@ -531,7 +703,6 @@
       tip: x => { const s = serAt(run, x); return `<div class="mono">${clock(x)}</div>` + [0, 1, 2].map(f => tipRow(colors[f], FL[f], Math.round(rate(s, f)) + '%')).join(''); },
     });
 
-    // 경보
     const alerts = [];
     [0, 1, 2].forEach(f => {
       const r = se.open[f] ? (se.occ[f] + se.held[f]) / se.open[f] : 0;
@@ -549,7 +720,6 @@
     if (!alerts.length) alerts.push({ sev: 'ok', text: '모든 층과 램프가 정상 범위입니다' });
     $('#alerts').innerHTML = alerts.map(a => `<li>${chip[a.sev]}<span>${a.text}</span>${a.op ? `<button class="btn sm ghost" type="button" data-op="${a.op}">적용</button>` : '<span></span>'}</li>`).join('');
 
-    // 운영 조치
     $('#opsActions').innerHTML = OPS.map(o => {
       const applied = S.liveOps.find(x => x.type === o.type);
       const always = o.type === 'openB3D' && S.p.b3;
@@ -561,7 +731,6 @@
       $('#opResult').innerHTML = `<div class="op-result">조치를 반영해 하루를 다시 계산했습니다 (조치 전 → 후, 하루 전체): ${row('평균 탐색', a.search, b.search)} · ${row('피크 진입', a.peakEntry, b.peakEntry)} · ${row('게이트 대기', a.gate, b.gate)}</div>`;
     } else $('#opResult').innerHTML = '';
 
-    // 예외
     const KIND = { ignore: ['warn', '배정 무시'], conflict: ['crit', '이중 점유'], sensor: ['crit', '센서'], expire: ['neutral', 'hold 만료'], reassign: ['info', '재배정'], op: ['held', '운영 조치'] };
     const ex = run.log.filter(e => KIND[e.kind] && e.t <= t && e.t > t - 3600).slice(-9).reverse();
     $('#exceptions').innerHTML = ex.length ? ex.map(e => `<li><span class="mono">${clock(e.t)}</span><span class="chip ${KIND[e.kind][0]}">${KIND[e.kind][1]}</span><span>${esc(e.text)}</span></li>`).join('') : '<li class="empty">최근 60분 동안 예외가 없습니다.</li>';
@@ -631,10 +800,10 @@
     ];
     const fmt = (v, u) => u === 'sec' ? dur(v) : u === 'pp' ? v.toFixed(1) + '%p' : pct(v, 1);
     const cell = (m, run, row) => {
-      if (run === n && !row[4]) return '<td class="muted">—</td>';
+      if (run === S.runs.none && !row[4]) return '<td class="muted">—</td>';
       const v = m[row[2]];
       let d = '';
-      if (row[4] && run !== n && n[row[2]] > 0) { const x = (v - n[row[2]]) / n[row[2]]; d = `<span class="dlt ${x < 0 ? 'good' : 'bad'}">${x < 0 ? '▼' : '▲'}${pct(Math.abs(x))}</span>`; }
+      if (row[4] && run !== S.runs.none && n[row[2]] > 0) { const x = (v - n[row[2]]) / n[row[2]]; d = `<span class="dlt ${x < 0 ? 'good' : 'bad'}">${x < 0 ? '▼' : '▲'}${pct(Math.abs(x))}</span>`; }
       return `<td><b>${fmt(v, row[3])}</b>${d}</td>`;
     };
     $('#cmpTable').innerHTML = `<thead><tr><th>지표</th><th>자율 탐색 (현재 방식)</th><th>그리디 배정</th><th>롤링 호라이즌 배정</th></tr></thead><tbody>` +
@@ -677,13 +846,10 @@
     const sel = $('#simSeed');
     sel.innerHTML = SEEDS.map((s, i) => `<option value="${i}">${s.label}</option>`).join('');
     const map = [['simComp', 'compliance', 'oComp', 100], ['simPart', 'participation', 'oPart', 100], ['simEta', 'etaShare', 'oEta', 100], ['simCap', 'holdCap', 'oCap', 100]];
-    const sync = () => {
-      sel.value = S.p.seed;
-      map.forEach(([id, k, o, mul]) => { $('#' + id).value = Math.round(S.p[k] * mul); $('#' + o).textContent = Math.round(S.p[k] * mul) + '%'; });
-      ['w1', 'w2', 'w3', 'w4', 'w5'].forEach(k => { $('#' + k).value = S.p.w[k]; $('#o' + k).textContent = S.p.w[k].toFixed(1); });
-      $('#simB3').checked = S.p.b3;
-    };
-    sync();
+    sel.value = S.p.seed;
+    map.forEach(([id, k, o, mul]) => { $('#' + id).value = Math.round(S.p[k] * mul); $('#' + o).textContent = Math.round(S.p[k] * mul) + '%'; });
+    ['w1', 'w2', 'w3', 'w4', 'w5'].forEach(k => { $('#' + k).value = S.p.w[k]; $('#o' + k).textContent = S.p.w[k].toFixed(1); });
+    $('#simB3').checked = S.p.b3;
     const stale = () => { $('#simStale').hidden = false; };
     sel.addEventListener('change', () => { S.p.seed = +sel.value; stale(); });
     map.forEach(([id, k, o]) => $('#' + id).addEventListener('input', e => { S.p[k] = +e.target.value / 100; $('#' + o).textContent = e.target.value + '%'; stale(); }));
@@ -713,6 +879,14 @@
     $('#play').innerHTML = on ? PAUSE : PLAY;
     $('#play').setAttribute('aria-label', on ? '일시 정지' : '시간 흐름 재생');
   }
+  function renderMode() {
+    const el = $('#modeChip');
+    if (!api) { el.className = 'chip neutral'; el.textContent = '데모 모드 · 서버 없이 실행'; el.title = '?api=서버주소 로 백엔드에 연결할 수 있습니다'; return; }
+    const nav = apiInfo && apiInfo.nav_providers;
+    el.className = 'chip info';
+    el.textContent = `API 연결 · ${nav ? (nav.tmap ? 'TMAP 실시간' : nav.kakao ? '카카오 실시간' : '교통 모델') : '확인 중'}`;
+    el.title = API_BASE;
+  }
   function render() {
     const v = S.view;
     $('.app').dataset.view = v;
@@ -726,9 +900,22 @@
   }
   function go(v) {
     S.view = v;
-    try { history.replaceState(null, '', '#' + v); } catch (e) { /* 샌드박스에서는 무시 */ }
+    try { history.replaceState(null, '', location.search + '#' + v); } catch (e) { /* 샌드박스에서는 무시 */ }
     render();
     window.scrollTo(0, 0);
+  }
+  async function connectApi() {
+    if (!api) return;
+    try {
+      apiInfo = await api.health();
+      renderMode();
+      await ensureSession();
+      if (S.view === 'visitor') renderVisitor();
+    } catch (e) {
+      api = null; API_BASE = null;
+      const el = $('#modeChip'); el.className = 'chip warn'; el.textContent = 'API 연결 실패 · 데모 모드로 실행';
+      if (S.view === 'visitor') renderVisitor();
+    }
   }
 
   function init() {
@@ -750,7 +937,9 @@
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     if (mq.addEventListener) mq.addEventListener('change', render);
     new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    renderMode();
     render();
+    connectApi();
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => {
       Promise.all(['700 15px "IBM Plex Sans KR"', '600 12px "Barlow Condensed"'].map(f => document.fonts.load(f, '가B2').catch(() => null))).then(render);
     });

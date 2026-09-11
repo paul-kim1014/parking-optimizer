@@ -233,6 +233,15 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .ph-map canvas { display: block; width: 100%; border-radius: 6px; border: 1px solid var(--rule-2); }
 .notice { background: var(--paint-soft); border: 1px solid var(--paint); color: var(--ink); padding: 10px 12px; border-radius: 6px; font-size: 13px; }
 .notice b { font-weight: 600; }
+.navcard { border: 1px solid var(--rule); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 12px; background: var(--surface); }
+.navcard-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.navcard-head .mono { font-size: 12px; color: var(--ink-3); }
+.eta-big { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.eta-big b { font: 700 48px/1 var(--f-sign); font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+.eta-big span { font-size: 13px; color: var(--ink-2); }
+.navcard .btn.ghost { text-decoration: none; }
+.opt:disabled { opacity: .45; cursor: not-allowed; }
+.brand .chip { margin-left: 4px; align-self: center; }
 .led { display: block; width: 100%; border-radius: 6px; border: 7px solid #22282E; background: #060807; }
 .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .steps li { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px 0; border-top: 1px solid var(--rule-2); font-size: 13.5px; }

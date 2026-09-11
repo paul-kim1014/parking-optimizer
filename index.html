@@ -18,6 +18,7 @@
     <div class="brand">
       <span class="psign" aria-hidden="true">P</span>
       <div><strong>자리먼저</strong><span class="brand-sub">도착하기 전에 자리를 정해주는 주차장 · MVP 프로토타입</span></div>
+      <span class="chip neutral" id="modeChip">데모 모드</span>
     </div>
     <div class="facility">
       <span>한결종합병원 <em>(가상 파일럿 시설)</em></span>
@@ -188,25 +189,43 @@
           </table></div>
         </section>
         <section>
-          <h2>API 초안(부록 B)과 코드 대응</h2>
-          <p>엔진은 <code>engine.js</code> 한 파일에 있고, 화면은 이 함수들만 호출합니다. FastAPI 백엔드로 옮길 때 같은 경계를 그대로 엔드포인트로 씁니다.</p>
+          <h2>내비게이션 연동 ETA</h2>
+          <p>방문객은 도착 시각을 직접 넣지 않습니다. 위치 공유에 동의하면 현재 위치에서 병원까지의 자동차 경로를 내비 경로 API로 계산해, 거리와 실시간 교통이 반영된 소요 시간으로 도착 예정 시각을 잡습니다. 화면을 열어 두면 1분마다 다시 계산하고, 길안내는 선택한 내비 앱(TMAP · 카카오맵 · 네이버 지도)을 딥링크로 엽니다.</p>
           <div class="tbl-wrap"><table class="data">
-            <thead><tr><th>엔드포인트</th><th>프로토타입 함수</th></tr></thead>
+            <thead><tr><th>ETA 출처</th><th>방식</th><th>오차 σ [가정]</th></tr></thead>
             <tbody>
-              <tr><td><code>POST /v1/facilities/{id}/reservations</code></td><td><code>generateDay()</code> — 예약 토큰 · 시각 · 존 생성(합성)</td></tr>
-              <tr><td><code>POST /v1/sessions/{token}/eta</code></td><td>방문객 화면 도착 시각 · 공유 스위치 → 도착 분포(평균 · σ)</td></tr>
-              <tr><td><code>POST /v1/facilities/{id}/events</code></td><td><code>simulate()</code> 내부 입차 · 점유 · 센서 이벤트</td></tr>
-              <tr><td><code>GET /v1/sessions/{token}/assignment</code></td><td><code>rankSlots()</code> + <code>walkParts()</code></td></tr>
-              <tr><td><code>GET /v1/facilities/{id}/forecast?horizon=120</code></td><td><code>forecastBucket()</code></td></tr>
-              <tr><td><code>GET /v1/facilities/{id}/state</code></td><td>5분 스냅숏 (<code>snaps</code>)</td></tr>
-              <tr><td><code>POST /v1/facilities/{id}/operations</code></td><td>운영 조치 → <code>ops</code> 재시뮬레이션</td></tr>
+              <tr><td>TMAP 실시간 교통</td><td>SK open API 자동차 경로안내 (<code>searchOption=0</code> 교통최적) — 서버에 <code>TMAP_APP_KEY</code> 설정 시</td><td>소요 시간의 8%, 최소 3분</td></tr>
+              <tr><td>카카오내비 실시간 교통</td><td>카카오모빌리티 길찾기 API — TMAP 실패 시 대체</td><td>소요 시간의 8%, 최소 3분</td></tr>
+              <tr><td>교통 패턴 모델</td><td>직선거리 × 우회 계수, 시간대별 도심 · 간선 평균 속도 — 키가 없거나 외부 API 장애 시, 그리고 서버 없는 데모</td><td>소요 시간의 15%, 최소 4분</td></tr>
+              <tr><td>내비 파트너 웹훅 (Phase 2)</td><td>내비 앱이 길안내 중 ETA를 서버로 직접 보냄 (<code>POST /v1/partners/{provider}/eta</code>, HMAC 서명)</td><td>3분</td></tr>
+            </tbody>
+          </table></div>
+          <p>한계: 웹 화면에서 TMAP 앱 안의 ETA를 직접 읽을 수는 없습니다. 지금은 같은 TMAP 경로 엔진을 API로 호출하는 방식이며, 방문객이 내비 앱으로 넘어가 이 화면이 백그라운드로 가면 갱신이 멈추고 마지막 계산값을 씁니다. 길안내 중 끊김 없는 ETA는 파트너 웹훅(기획서 4.1 Phase 2)으로 해결합니다.</p>
+        </section>
+        <section>
+          <h2>백엔드 API (FastAPI)</h2>
+          <p>레포의 <code>backend/</code>에 부록 B의 핵심 API를 구현했습니다. 배정 엔진은 이 화면의 <code>engine.js</code>와 같은 비용 함수를 Python으로 옮긴 것이고, 테스트가 두 구현의 비용 표 · 슬롯 순위 · 교통 모델 값이 같은지 교차 검증합니다. 서버 주소를 <code>config.js</code>에 넣거나 주소 뒤에 <code>?api=서버주소</code>를 붙이면 방문객 화면이 서버 모드로 바뀝니다.</p>
+          <div class="tbl-wrap"><table class="data">
+            <thead><tr><th>엔드포인트</th><th>역할</th><th>인증</th></tr></thead>
+            <tbody>
+              <tr><td><code>POST /v1/facilities/{id}/reservations</code></td><td>예약 어댑터 → 예약 토큰 · 시각 · 존 등록</td><td>시설 키</td></tr>
+              <tr><td><code>POST /v1/sessions</code></td><td>알림톡 링크를 연 방문객 세션 생성</td><td>예약 토큰</td></tr>
+              <tr><td><code>POST /v1/sessions/{token}/consent</code></td><td>위치 · ETA 공유 동의, 차량 조건, 번호판(즉시 해시)</td><td>세션 토큰</td></tr>
+              <tr><td><code>POST /v1/sessions/{token}/eta</code></td><td>현재 위치 → 내비 경로 ETA (TMAP → 카카오 → 모델 순)</td><td>세션 토큰</td></tr>
+              <tr><td><code>GET /v1/sessions/{token}/assignment</code></td><td>배정 슬롯 · 램프 · 도보 안내 · 후보 비용 내역</td><td>세션 토큰</td></tr>
+              <tr><td><code>POST /v1/facilities/{id}/events</code></td><td>LPR 입출차 · 면 센서 · 게이트 대기 (관제 우선, 입차 시 전광판 문구 반환)</td><td>시설 키</td></tr>
+              <tr><td><code>GET /v1/facilities/{id}/forecast</code></td><td>15분 단위 도착 예측 P10 / P50 / P90</td><td>공개(집계값)</td></tr>
+              <tr><td><code>GET /v1/facilities/{id}/state</code></td><td>층 · 슬롯 상태 스냅숏</td><td>공개(집계값)</td></tr>
+              <tr><td><code>POST /v1/facilities/{id}/operations</code></td><td>구역 개방 · 폐쇄, 엔진 중지(열화 모드), 가중치 · hold 상한</td><td>시설 키</td></tr>
+              <tr><td><code>POST /v1/partners/{provider}/eta</code></td><td>Phase 2 내비 파트너 ETA 수신</td><td>HMAC 서명</td></tr>
             </tbody>
           </table></div>
         </section>
         <section>
           <h2>다음 단계</h2>
           <ol>
-            <li>엔진을 Python(FastAPI · OR-Tools · SimPy)으로 옮기고, 이 브라우저 결과와 같은 입력에서 수치가 일치하는지 교차 검증</li>
+            <li>SK open API에서 TMAP appKey를 발급받아 서버에 넣고, 파일럿 시설 주변 실제 경로로 ETA 오차(개별 예측 MAE · ±10분 적중률)를 측정</li>
+            <li>상태 저장소를 PostgreSQL · Redis로 옮기기 (지금은 서버 메모리, 재시작 시 초기화)</li>
             <li>도면 임포터: 파일럿 시설 도면 → 슬롯 · 통로 · 승강기 그래프 (온보딩 2주 목표의 핵심)</li>
             <li>관제 어댑터(읽기)로 과거 입출차 로그 6개월을 받아 합성 수요를 실측 재생으로 교체</li>
             <li>승강기 대기 분산을 비용 함수에 넣어 H3(도보 25% 감소) 재검증</li>
@@ -217,7 +236,9 @@
   </main>
 </div>
 
+<script src="config.js"></script>
 <script src="engine.js"></script>
+<script src="nav.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

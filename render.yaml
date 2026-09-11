@@ -1,0 +1,25 @@
+# Render Blueprint — 백엔드 API 한 개. 대시보드에서 "New → Blueprint"로 이 레포를 연결하면 된다.
+# TMAP_APP_KEY · KAKAO_REST_KEY는 배포 후 대시보드에서 직접 입력한다.
+services:
+  - type: web
+    name: parkahead-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: TMAP_APP_KEY
+        sync: false
+      - key: KAKAO_REST_KEY
+        sync: false
+      - key: FACILITY_API_KEY
+        generateValue: true
+      - key: FACILITY_SALT
+        generateValue: true
+      - key: PARTNER_WEBHOOK_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://paul-kim1014.github.io
+      - key: DEMO
+        value: "1"
